@@ -242,10 +242,10 @@ def _get_replay_buffer(dataset_path, shape_meta, store):
             lowdim_keys.append(key)
             lowdim_shapes[key] = tuple(shape)
             if 'pose' in key:
-                assert tuple(shape) in [(2,),(6,)]
+                assert tuple(shape) in [(2,),(6,),(7,)]  # 支持 2D/6D/7D
     
     action_shape = tuple(shape_meta['action']['shape'])
-    assert action_shape in [(2,),(6,)]
+    assert action_shape in [(2,),(6,),(7,)]  # 支持 2D/6D/7D action
 
     # load data
     cv2.setNumThreads(1)

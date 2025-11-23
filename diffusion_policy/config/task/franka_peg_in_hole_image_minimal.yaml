@@ -1,0 +1,38 @@
+name: franka_peg_in_hole_image_minimal
+
+# 图像配置
+image_shape: [3, 480, 640]  # C, H, W
+
+# 数据集路径 - 修改为你的数据路径
+dataset_path: /home/zpw/ws_zpw/megvii/data/2025_11_18/zarr_dataset/peg_in_hole_zarr
+
+shape_meta: &shape_meta
+  obs:
+    # 最小配置：只使用一个主相机
+    camera_0:  # main_realsense
+      shape: ${task.image_shape}
+      type: rgb
+    
+    # 末端位姿状态 (7维: xyz + rotation_vector + gripper)
+    robot_eef_pose:
+      shape: [7]
+      type: low_dim
+  
+  # 动作空间 (7维)
+  action: 
+    shape: [7]
+
+dataset:
+  _target_: diffusion_policy.dataset.real_pusht_image_dataset.RealPushTImageDataset
+  shape_meta: *shape_meta
+  dataset_path: ${task.dataset_path}
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1+${n_latency_steps}'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  n_obs_steps: ${dataset_obs_steps}
+  n_latency_steps: ${n_latency_steps}
+  use_cache: True
+  seed: 42
+  val_ratio: 0.02
+  max_train_episodes: null
+  delta_action: False
