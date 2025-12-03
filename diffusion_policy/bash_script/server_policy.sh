@@ -1,0 +1,1 @@
+cd /home/zpw/ws_zpw/megvii/IL/diffusion_policy && python serve_diffusion_policy.py -i /home/zpw/ws_zpw/megvii/IL/diffusion_policy/data/outputs/2025.11.23/23.48.38_train_diffusion_unet_franka_image_franka_peg_in_hole_image/checkpoints/epoch=0150-train_loss=0.003.ckpt -p 8000

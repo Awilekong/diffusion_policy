@@ -54,11 +54,26 @@ nohup python train.py \
     task.dataset_path=/home/zpw/ws_zpw/megvii/data/2025_11_18/zarr_dataset/peg_in_hole_zarr \
     horizon=8 \
     n_action_steps=4 \
-    exp_name="horizon_8" \
+    exp_name="horizon_8_new" \
     training.device="cuda:6" \
-    > train_horizon_8.log 2>&1 &
+    > train_horizon_8_new.log 2>&1 &
 
 echo "Exp (horizon=8) started on cuda:6, log: logs/train_horizon_8.log"
+
+# ===============================================
+# 实验组: n_obs_steps=1 (单帧观测)
+# ===============================================
+nohup python train.py \
+    --config-name=train_diffusion_unet_franka_image_workspace \
+    task.dataset_path=/home/zpw/ws_zpw/megvii/data/2025_11_18/zarr_dataset/peg_in_hole_zarr \
+    horizon=8 \
+    n_action_steps=4 \
+    n_obs_steps=1 \
+    exp_name="n_obs_1" \
+    training.device="cuda:7" \
+    > train_n_obs_1.log 2>&1 &
+
+echo "Exp (n_obs_steps=1) started on cuda:7, log: logs/train_n_obs_1.log"
 
 # ===============================================
 # 查看所有训练进程
@@ -74,3 +89,4 @@ echo "  tail -f logs/train_baseline_h16.log"
 echo "  tail -f logs/train_no_random_crop.log"
 echo "  tail -f logs/train_horizon_32.log"
 echo "  tail -f logs/train_horizon_8.log"
+echo "  tail -f logs/train_n_obs_1.log"
