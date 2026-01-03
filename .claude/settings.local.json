@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile:*)",
+      "Bash(python test_wandb_debug.py:*)",
+      "Bash(conda run:*)",
+      "Bash(source:*)",
+      "Bash(conda activate robodiff)",
+      "Bash(conda env:*)",
+      "Bash(bash -c \"source ~/.bashrc && conda activate robodiff && python test_wandb_debug.py\")",
+      "Bash(bash -c 'eval \"\"$\\(/root/mambaforge/bin/conda shell.bash hook\\)\"\" && conda activate robodiff && which python')",
+      "Bash(echo:*)",
+      "Bash(/root/miniconda3/envs/robodiff/bin/python:*)",
+      "Bash(cat:*)",
+      "Bash(chmod:*)",
+      "Bash(python train.py:*)",
+      "Bash(bash -c \"source ~/.bashrc && conda activate robodiff && which python\")",
+      "Bash(bash:*)"
+    ]
+  }
+}

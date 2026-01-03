@@ -1,4 +1,4 @@
-from typing import Dict
+from typing import Dict, Callable, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -13,12 +13,12 @@ from diffusion_policy.model.vision.multi_image_obs_encoder import MultiImageObsE
 from diffusion_policy.common.pytorch_util import dict_apply
 
 class DiffusionUnetImagePolicy(BaseImagePolicy):
-    def __init__(self, 
+    def __init__(self,
             shape_meta: dict,
             noise_scheduler: DDPMScheduler,
             obs_encoder: MultiImageObsEncoder,
-            horizon, 
-            n_action_steps, 
+            horizon,
+            n_action_steps,
             n_obs_steps,
             num_inference_steps=None,
             obs_as_global_cond=True,
@@ -30,6 +30,9 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
             # parameters passed to step
             **kwargs):
         super().__init__()
+
+        # 调试回调函数（用于记录中间数据）
+        self.debug_callback: Optional[Callable] = None
 
         # parse shapes
         action_shape = shape_meta['action']['shape']
@@ -128,6 +131,11 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
         assert 'past_action' not in obs_dict # not implemented yet
         # normalize input
         nobs = self.normalizer.normalize(obs_dict)
+
+        # 调试回调：记录归一化后的观测（Stage 3）
+        if self.debug_callback is not None:
+            self.debug_callback('stage3_normalized_obs', nobs)
+
         value = next(iter(nobs.values()))
         B, To = value.shape[:2]
         T = self.horizon
@@ -145,6 +153,11 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
         if self.obs_as_global_cond:
             # condition through global feature
             this_nobs = dict_apply(nobs, lambda x: x[:,:To,...].reshape(-1,*x.shape[2:]))
+
+            # 调试回调：记录送入 obs_encoder 前的数据（Stage 4 前）
+            if self.debug_callback is not None:
+                self.debug_callback('stage4_before_encoder', this_nobs)
+
             nobs_features = self.obs_encoder(this_nobs)
             # reshape back to B, Do
             global_cond = nobs_features.reshape(B, -1)
@@ -154,6 +167,11 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
         else:
             # condition through impainting
             this_nobs = dict_apply(nobs, lambda x: x[:,:To,...].reshape(-1,*x.shape[2:]))
+
+            # 调试回调：记录送入 obs_encoder 前的数据（Stage 4 前）
+            if self.debug_callback is not None:
+                self.debug_callback('stage4_before_encoder', this_nobs)
+
             nobs_features = self.obs_encoder(this_nobs)
             # reshape back to B, T, Do
             nobs_features = nobs_features.reshape(B, To, -1)
@@ -164,21 +182,30 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
 
         # run sampling
         nsample = self.conditional_sample(
-            cond_data, 
+            cond_data,
             cond_mask,
             local_cond=local_cond,
             global_cond=global_cond,
             **self.kwargs)
-        
+
         # unnormalize prediction
         naction_pred = nsample[...,:Da]
+
+        # 调试回调：记录归一化空间的动作（Action Stage 1）
+        if self.debug_callback is not None:
+            self.debug_callback('action_stage1_normalized', naction_pred)
+
         action_pred = self.normalizer['action'].unnormalize(naction_pred)
+
+        # 调试回调：记录完整预测序列（Action Stage 2）
+        if self.debug_callback is not None:
+            self.debug_callback('action_stage2_pred_full', action_pred)
 
         # get action
         start = To - 1
         end = start + self.n_action_steps
         action = action_pred[:,start:end]
-        
+
         result = {
             'action': action,
             'action_pred': action_pred
@@ -193,9 +220,18 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
         # normalize input
         assert 'valid_mask' not in batch
         nobs = self.normalizer.normalize(batch['obs'])
+
+        # 调试回调：记录归一化后的观测（对应推理的 Stage 3）
+        if self.debug_callback is not None:
+            self.debug_callback('train_stage3_normalized_obs', nobs)
+
         nactions = self.normalizer['action'].normalize(batch['action'])
         batch_size = nactions.shape[0]
         horizon = nactions.shape[1]
+
+        # 调试回调：记录归一化后的动作（用于 3D 轨迹可视化）
+        if self.debug_callback is not None:
+            self.debug_callback('train_action_normalized', nactions)
 
         # handle different ways of passing observation
         local_cond = None
@@ -204,14 +240,24 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
         cond_data = trajectory
         if self.obs_as_global_cond:
             # reshape B, T, ... to B*T
-            this_nobs = dict_apply(nobs, 
+            this_nobs = dict_apply(nobs,
                 lambda x: x[:,:self.n_obs_steps,...].reshape(-1,*x.shape[2:]))
+
+            # 调试回调：记录 reshape 后送入 obs_encoder 的数据
+            if self.debug_callback is not None:
+                self.debug_callback('train_before_encoder', this_nobs)
+
             nobs_features = self.obs_encoder(this_nobs)
             # reshape back to B, Do
             global_cond = nobs_features.reshape(batch_size, -1)
         else:
             # reshape B, T, ... to B*T
             this_nobs = dict_apply(nobs, lambda x: x.reshape(-1, *x.shape[2:]))
+
+            # 调试回调：记录 reshape 后送入 obs_encoder 的数据
+            if self.debug_callback is not None:
+                self.debug_callback('train_before_encoder', this_nobs)
+
             nobs_features = self.obs_encoder(this_nobs)
             # reshape back to B, T, Do
             nobs_features = nobs_features.reshape(batch_size, horizon, -1)

@@ -31,8 +31,8 @@ cd /home/zpw/ws_zpw/megvii/IL/diffusion_policy
 
 # 启动服务器
 python serve_diffusion_policy_single_frame.py \
-    -i /home/zpw/ws_zpw/megvii/IL/diffusion_policy/data/outputs/2025.12.02/10.55.53_train_diffusion_unet_franka_image_franka_peg_in_hole_image/checkpoints/latest.ckpt \
-    -p 8001 \
+    -i /root/code/zpw/IL/diffusion_policy/data/outputs/2025.12.08/20.56.42_train_diffusion_unet_franka_image_franka_peg_in_hole_image/checkpoints/latest.ckpt \
+    -p 8000 \
     -d cuda
 ```
 

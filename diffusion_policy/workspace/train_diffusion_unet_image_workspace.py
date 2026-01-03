@@ -123,6 +123,16 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
             }
         )
 
+        # configure training data debugger
+        train_debugger = None
+        if cfg.training.get('enable_data_debug', False):
+            from diffusion_policy.common.train_wandb_debugger import TrainWandbDebugger
+            train_debugger = TrainWandbDebugger(
+                wandb_run=wandb_run,
+                enabled=True
+            )
+            print(f"✅ 训练数据调试已启用，每 {cfg.training.get('debug_every', 10)} 个 epoch 记录一次")
+
         # configure checkpoint
         topk_manager = TopKCheckpointManager(
             save_dir=os.path.join(self.output_dir, 'checkpoints'),
@@ -159,7 +169,8 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                     self.model.obs_encoder.requires_grad_(False)
 
                 train_losses = list()
-                with tqdm.tqdm(train_dataloader, desc=f"Training epoch {self.epoch}", 
+
+                with tqdm.tqdm(train_dataloader, desc=f"Training epoch {self.epoch}",
                         leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                     for batch_idx, batch in enumerate(tepoch):
                         # device transfer
@@ -167,10 +178,51 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                         if train_sampling_batch is None:
                             train_sampling_batch = batch
 
+                        # 是否需要记录调试数据（每 N 个 epoch 记录一次，在第一个 batch）
+                        # epoch 0 也要记录，所以 epoch % debug_every == 0
+                        should_debug = (train_debugger is not None and
+                                       batch_idx == 0 and
+                                       self.epoch % cfg.training.get('debug_every', 10) == 0)
+
+                        # 保存原始 batch 用于调试
+                        batch_raw = None
+                        captured_data = {}
+                        if should_debug:
+                            batch_raw = dict_apply(batch, lambda x: x.detach().cpu())
+
+                            # 设置调试回调来捕获中间数据
+                            def debug_callback(stage_name, data):
+                                # 保存数据的副本
+                                if isinstance(data, dict):
+                                    captured_data[stage_name] = {
+                                        k: v.detach().cpu() if isinstance(v, torch.Tensor) else v
+                                        for k, v in data.items()
+                                    }
+                                else:
+                                    captured_data[stage_name] = data.detach().cpu() if isinstance(data, torch.Tensor) else data
+
+                            self.model.debug_callback = debug_callback
+                            self.model.obs_encoder.debug_callback = debug_callback
+
                         # compute loss
                         raw_loss = self.model.compute_loss(batch)
                         loss = raw_loss / cfg.training.gradient_accumulate_every
                         loss.backward()
+
+                        # 记录调试数据
+                        if should_debug and batch_raw is not None:
+                            # 清理回调
+                            self.model.debug_callback = None
+                            self.model.obs_encoder.debug_callback = None
+
+                            # 记录到 WandB
+                            train_debugger.log_training_batch(
+                                captured_data=captured_data,
+                                batch_raw=batch_raw,
+                                epoch=self.epoch,
+                                step=self.global_step,
+                                sample_idx=0  # 只记录第一个样本
+                            )
 
                         # step optimizer
                         if self.global_step % cfg.training.gradient_accumulate_every == 0:

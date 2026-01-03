@@ -12,10 +12,10 @@ cd /home/zpw/ws_zpw/megvii/IL/diffusion_policy
 # ===============================================
 nohup python train.py \
     --config-name=train_diffusion_unet_franka_image_workspace \
-    task.dataset_path=/home/zpw/ws_zpw/megvii/data/2025_11_18/zarr_dataset/peg_in_hole_zarr \
-    exp_name="baseline_h16" \
-    training.device="cuda:3" \
-    > logs/train_baseline_h16.log 2>&1 &
+    task.dataset_path=/mlp_vepfs/share/zpw/data/zarr_dataset/peg_in_hole_zarr \
+    exp_name="baseline_h16_obs1" \
+    training.device="cuda:1" \
+    > logs/train_baseline_h16_obs1.log 2>&1 &
 
 echo "Baseline (horizon=16) started on cuda:3, log: logs/train_baseline_h16.log"
 
@@ -90,3 +90,53 @@ echo "  tail -f logs/train_no_random_crop.log"
 echo "  tail -f logs/train_horizon_32.log"
 echo "  tail -f logs/train_horizon_8.log"
 echo "  tail -f logs/train_n_obs_1.log"
+
+
+conda run -n robodiff pip install --upgrade diffusers
+
+conda run -n robodiff pip install huggingface_hub==0.19.4 -i https://pypi.org/simple
+
+# ===============================================
+# Resume训练命令 - 从checkpoint继续训练
+# ===============================================
+# 说明: checkpoint中已保存所有配置，只需指定输出目录和resume=True即可
+
+# Resume方式1: 恢复 baseline_h16_obs1 实验
+python train.py \
+    training.resume=True \
+    hydra.run.dir=/mlp_vepfs/share/zpw/IL/diffusion_policy/data/outputs/2025.12.13/15.31.25_train_diffusion_unet_franka_image_franka_peg_in_hole_image \
+    training.device="cuda:1"
+
+# Resume方式2: 恢复 horizon_32 实验
+# nohup python train.py \
+#     training.resume=True \
+#     hydra.run.dir=<your_output_dir> \
+#     training.device="cuda:5" \
+#     > logs/train_horizon32_resume.log 2>&1 &
+
+# Resume方式3: 恢复 horizon_8_new 实验
+# nohup python train.py \
+#     training.resume=True \
+#     hydra.run.dir=<your_output_dir> \
+#     training.device="cuda:6" \
+#     > logs/train_horizon8_resume.log 2>&1 &
+
+# Resume方式4: 恢复 n_obs_1 实验
+# nohup python train.py \
+#     training.resume=True \
+#     hydra.run.dir=<your_output_dir> \
+#     training.device="cuda:7" \
+#     > logs/train_nobs1_resume.log 2>&1 &
+
+# Resume方式5: 恢复 no_random_crop 实验
+# nohup python train.py \
+#     training.resume=True \
+#     hydra.run.dir=<your_output_dir> \
+#     training.device="cuda:4" \
+#     > logs/train_nocrop_resume.log 2>&1 &
+
+# 使用步骤:
+# 1. 找到输出目录: cd /home/zpw/ws_zpw/megvii/IL/diffusion_policy && ls -lt outputs/ | head -20
+# 2. 确认有checkpoint: ls <output_dir>/checkpoints/latest.ckpt
+# 3. 替换 <your_output_dir> 为实际路径 (如: outputs/2025-12-15/14-30-00)
+# 4. 删除 # 号运行即可

@@ -1,4 +1,4 @@
-from typing import Dict, Tuple, Union
+from typing import Dict, Tuple, Union, Callable, Optional
 import copy
 import torch
 import torch.nn as nn
@@ -28,6 +28,9 @@ class MultiImageObsEncoder(ModuleAttrMixin):
         Assumes low_dim input: B,D
         """
         super().__init__()
+
+        # 调试回调函数
+        self.debug_callback: Optional[Callable] = None
 
         rgb_keys = list()
         low_dim_keys = list()
@@ -153,6 +156,7 @@ class MultiImageObsEncoder(ModuleAttrMixin):
             features.append(feature)
         else:
             # run each rgb obs to independent models
+            transformed_imgs = {}  # 用于调试回调
             for key in self.rgb_keys:
                 img = obs_dict[key]
                 if batch_size is None:
@@ -161,8 +165,16 @@ class MultiImageObsEncoder(ModuleAttrMixin):
                     assert batch_size == img.shape[0]
                 assert img.shape[1:] == self.key_shape_map[key]
                 img = self.key_transform_map[key](img)
+
+                # 保存 transform 后的图像用于调试
+                transformed_imgs[key] = img
+
                 feature = self.key_model_map[key](img)
                 features.append(feature)
+
+            # 调试回调：记录 transform 后送入 ResNet 的图像（Stage 4）
+            if self.debug_callback is not None and len(transformed_imgs) > 0:
+                self.debug_callback('stage4_final_to_unet', transformed_imgs)
         
         # process lowdim input
         for key in self.low_dim_keys:
