@@ -123,15 +123,23 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
             }
         )
 
-        # configure training data debugger
+        # configure training data debugger (handles both training and validation)
         train_debugger = None
-        if cfg.training.get('enable_data_debug', False):
+        if cfg.training.get('enable_data_debug', False) or cfg.training.get('enable_val_debug', False):
             from diffusion_policy.common.train_wandb_debugger import TrainWandbDebugger
+            # 获取 delta_action 配置
+            delta_action = cfg.task.dataset.get('delta_action', False)
             train_debugger = TrainWandbDebugger(
                 wandb_run=wandb_run,
-                enabled=True
+                enabled=True,
+                delta_action=delta_action
             )
-            print(f"✅ 训练数据调试已启用，每 {cfg.training.get('debug_every', 10)} 个 epoch 记录一次")
+            if delta_action:
+                print(f"✅ Delta Action 模式已启用，3D轨迹可视化将从初始状态重建绝对轨迹")
+            if cfg.training.get('enable_data_debug', False):
+                print(f"✅ 训练数据调试已启用，每 {cfg.training.get('debug_every', 10)} 个 epoch 记录一次")
+            if cfg.training.get('enable_val_debug', False):
+                print(f"✅ 验证数据调试已启用，每 {cfg.training.get('val_debug_every', 10)} 个 epoch 记录 {cfg.training.get('val_debug_num_samples', 5)} 个样本")
 
         # configure checkpoint
         topk_manager = TopKCheckpointManager(
@@ -180,9 +188,11 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
 
                         # 是否需要记录调试数据（每 N 个 epoch 记录一次，在第一个 batch）
                         # epoch 0 也要记录，所以 epoch % debug_every == 0
+                        # 或者在第一个step (global_step==0) 时也记录
                         should_debug = (train_debugger is not None and
                                        batch_idx == 0 and
-                                       self.epoch % cfg.training.get('debug_every', 10) == 0)
+                                       (self.global_step == 0 or
+                                        self.epoch % cfg.training.get('debug_every', 10) == 0))
 
                         # 保存原始 batch 用于调试
                         batch_raw = None
@@ -215,13 +225,28 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                             self.model.debug_callback = None
                             self.model.obs_encoder.debug_callback = None
 
-                            # 记录到 WandB
+                            # 对于首次或需要3D轨迹对比的epoch，获取预测动作
+                            action_pred_cpu = None
+                            if self.global_step == 0 or (cfg.training.get('enable_data_debug', False) and
+                                                          self.epoch % cfg.training.get('debug_every', 10) == 0):
+                                with torch.no_grad():
+                                    # 使用EMA模型预测（如果启用）
+                                    debug_policy = self.ema_model if cfg.training.use_ema else self.model
+                                    debug_policy.eval()
+
+                                    # 前向推理获取预测动作
+                                    obs_dict_single = dict_apply(batch['obs'], lambda x: x[:1])  # 取第一个样本
+                                    result = debug_policy.predict_action(obs_dict_single)
+                                    action_pred_cpu = result['action_pred'][0].cpu().numpy()  # (Ta, 7)
+
+                            # 记录完整数据流（首次）或仅3D轨迹对比（后续）到 WandB
                             train_debugger.log_training_batch(
                                 captured_data=captured_data,
                                 batch_raw=batch_raw,
                                 epoch=self.epoch,
                                 step=self.global_step,
-                                sample_idx=0  # 只记录第一个样本
+                                sample_idx=0,  # 只记录第一个样本
+                                action_pred=action_pred_cpu  # 提供预测动作用于3D对比
                             )
 
                         # step optimizer
@@ -277,15 +302,65 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                 if (self.epoch % cfg.training.val_every) == 0:
                     with torch.no_grad():
                         val_losses = list()
-                        with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}", 
+
+                        # 判断是否需要收集调试样本（每隔N个epoch）
+                        should_debug_val = (train_debugger is not None and
+                                           cfg.training.get('enable_val_debug', False) and
+                                           self.epoch % cfg.training.get('val_debug_every', 10) == 0)
+                        val_debug_samples = [] if should_debug_val else None
+
+                        with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}",
                                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                             for batch_idx, batch in enumerate(tepoch):
                                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+
+                                # 计算loss（始终需要）
                                 loss = self.model.compute_loss(batch)
                                 val_losses.append(loss)
+
+                                # === 收集验证样本用于3D轨迹可视化 ===
+                                if should_debug_val and len(val_debug_samples) < cfg.training.get('val_debug_num_samples', 5):
+                                    # 使用 EMA 模型（如果启用）进行预测
+                                    debug_policy = self.ema_model if cfg.training.use_ema else self.model
+
+                                    obs_dict = batch['obs']
+                                    action_gt = batch['action']  # (B, Ta, 7) - denormalized
+
+                                    # 前向推理获取预测
+                                    result = debug_policy.predict_action(obs_dict)
+                                    action_pred = result['action_pred']  # (B, Ta, 7) - denormalized
+
+                                    # 收集样本（取 batch 中的前几个样本）
+                                    B = action_gt.shape[0]
+                                    num_to_collect = min(B, cfg.training.get('val_debug_num_samples', 5) - len(val_debug_samples))
+
+                                    for sample_idx in range(num_to_collect):
+                                        sample_data = {
+                                            'action_gt': action_gt[sample_idx].cpu().numpy(),  # (Ta, 7)
+                                            'action_pred': action_pred[sample_idx].cpu().numpy(),  # (Ta, 7)
+                                            'loss': loss.item(),
+                                        }
+                                        # Delta action 模式下，添加初始状态（用于重建绝对轨迹）
+                                        if 'robot_eef_pose' in obs_dict:
+                                            robot_state = obs_dict['robot_eef_pose']
+                                            if isinstance(robot_state, torch.Tensor):
+                                                robot_state = robot_state.cpu().numpy()
+                                            # 取最后一个观测时间步作为初始状态
+                                            sample_data['initial_state'] = robot_state[sample_idx, -1]  # (7,)
+                                        val_debug_samples.append(sample_data)
+
                                 if (cfg.training.max_val_steps is not None) \
                                     and batch_idx >= (cfg.training.max_val_steps-1):
                                     break
+
+                        # === 记录3D轨迹可视化（仅轨迹，不含图像） ===
+                        if should_debug_val and val_debug_samples:
+                            train_debugger.log_validation_trajectories(
+                                val_samples=val_debug_samples,
+                                epoch=self.epoch,
+                                global_step=self.global_step
+                            )
+
                         if len(val_losses) > 0:
                             val_loss = torch.mean(torch.tensor(val_losses)).item()
                             # log epoch average validation loss

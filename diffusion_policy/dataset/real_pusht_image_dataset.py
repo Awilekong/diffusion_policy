@@ -84,8 +84,11 @@ class RealPushTImageDataset(BaseImageDataset):
         if delta_action:
             # replace action as relative to previous frame
             actions = replay_buffer['action'][:]
-            # support positions only at this time
-            assert actions.shape[1] <= 3
+            # 支持任意维度的 delta action:
+            # - 位置 (xyz): 直接差分
+            # - 旋转向量 (axis-angle): 直接差分（小角度近似有效）
+            # - 夹爪: 直接差分
+            # 已支持任意维度（包括 7 维: xyz + rotation_vector + gripper）
             actions_diff = np.zeros_like(actions)
             episode_ends = replay_buffer.episode_ends[:]
             for i in range(len(episode_ends)):

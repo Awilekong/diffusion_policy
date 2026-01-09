@@ -29,16 +29,45 @@ class TrainWandbDebugger:
     4. Ground truth vs predicted actions
     """
 
-    def __init__(self, wandb_run, enabled: bool = True):
+    def __init__(self, wandb_run, enabled: bool = True, delta_action: bool = False):
         """
         Args:
             wandb_run: 现有的 wandb run 对象（复用训练的 run）
             enabled: 是否启用调试
+            delta_action: 是否使用 delta action 模式，
+                         如果为 True，轨迹可视化时会从初始状态重建绝对轨迹
         """
         self.wandb_run = wandb_run
         self.enabled = enabled
         self.step_counter = 0
+        self.delta_action = delta_action
 
+    @staticmethod
+    def reconstruct_trajectory_from_delta(
+        delta_actions: np.ndarray,
+        initial_state: np.ndarray
+    ) -> np.ndarray:
+        """
+        从 delta actions 重建绝对轨迹
+
+        Args:
+            delta_actions: (T, action_dim) delta 动作序列
+            initial_state: (action_dim,) 初始状态（通常来自 robot_eef_pose）
+
+        Returns:
+            np.ndarray: (T, action_dim) 绝对位姿轨迹
+        """
+        T, action_dim = delta_actions.shape
+        absolute_trajectory = np.zeros((T, action_dim))
+
+        # 从初始状态开始累积
+        current_pose = initial_state.copy()
+        for t in range(T):
+            # 累积 delta
+            current_pose = current_pose + delta_actions[t]
+            absolute_trajectory[t] = current_pose
+
+        return absolute_trajectory
     def _create_3d_trajectory_plot(self, actions: np.ndarray, stage_name: str, epoch: int, is_normalized: bool = True) -> 'wandb.Image':
         """
         创建动作轨迹的 3D 可视化（前3个维度：x, y, z）
@@ -138,7 +167,9 @@ class TrainWandbDebugger:
                           batch_raw: dict,      # 原始 batch
                           epoch: int,
                           step: int,
-                          sample_idx: int = 0):  # 记录batch中的第几个样本
+                          sample_idx: int = 0,  # 记录batch中的第几个样本
+                          action_pred: np.ndarray = None,  # 可选：预测的动作用于3D对比
+                          initial_state: np.ndarray = None):  # delta action 模式下的初始状态
         """
         记录一个训练 batch 的数据（格式与推理一致）
 
@@ -157,6 +188,10 @@ class TrainWandbDebugger:
             epoch: 当前 epoch
             step: 全局步数
             sample_idx: 记录 batch 中的第几个样本（默认第一个）
+            action_pred: 可选，预测的动作 (Ta, 7) denormalized numpy array，
+                        如果提供，将创建 3D 轨迹对比图
+            initial_state: 可选，初始状态 (7,) numpy array，
+                          delta action 模式下用于重建绝对轨迹
         """
         if not self.enabled:
             return
@@ -164,6 +199,7 @@ class TrainWandbDebugger:
         log_data = {}
 
         # ========== 1. 图像可视化（对应推理的 4 个阶段）==========
+        # 统一使用 train_debug/ 命名空间
 
         # 阶段 1: 原始 batch 数据（对应推理的 stage1_raw）
         if 'obs' in batch_raw:
@@ -184,7 +220,7 @@ class TrainWandbDebugger:
                     else:
                         img = img.astype(np.uint8)
 
-                    log_data[f"train_images/stage1_batch_raw/{key}"] = wandb.Image(
+                    log_data[f"train_debug/stage1_batch_raw/{key}"] = wandb.Image(
                         img,
                         caption=f"Epoch {epoch} | {key} | Shape: {img.shape} | [0,1] float32"
                     )
@@ -204,7 +240,7 @@ class TrainWandbDebugger:
                     # 从 [-1,1] 映射到 [0,255]
                     img = ((img + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
 
-                    log_data[f"train_images/stage3_normalized/{key}"] = wandb.Image(
+                    log_data[f"train_debug/stage3_normalized/{key}"] = wandb.Image(
                         img,
                         caption=f"Epoch {epoch} | {key} | Shape: {img.shape} | [-1,1] float32"
                     )
@@ -227,16 +263,13 @@ class TrainWandbDebugger:
                 else:
                     img = np.zeros_like(img, dtype=np.uint8)
 
-                log_data[f"train_images/stage4_final_to_unet/{key} ⭐"] = wandb.Image(
+                log_data[f"train_debug/stage4_final_to_unet/{key}"] = wandb.Image(
                     img,
                     caption=f"Epoch {epoch} | {key} | Shape: {img.shape} | ImageNet norm"
                 )
 
-        # ========== 2. 动作对比：Ground Truth vs Predicted ==========
-
-        # Ground truth action
-        action_gt_sample = None
-        if 'action' in batch_raw:
+        # ========== 3. 3D 轨迹对比（当提供 action_pred 时）==========
+        if action_pred is not None and 'action' in batch_raw:
             action_gt = batch_raw['action']
             if isinstance(action_gt, torch.Tensor):
                 action_gt = action_gt.cpu().numpy()
@@ -244,49 +277,56 @@ class TrainWandbDebugger:
             # 取第一个样本: (B, T, Da) -> (T, Da)
             action_gt_sample = action_gt[sample_idx]
 
-            log_data["train_actions/ground_truth"] = self._create_action_table(
+            # action_pred 应该已经是 (T, Da) 格式
+            if len(action_pred.shape) == 3:  # 如果是 (B, T, Da)
+                action_pred_sample = action_pred[sample_idx]
+            else:
+                action_pred_sample = action_pred
+
+            # === Delta Action 模式：从初始状态重建绝对轨迹 ===
+            if self.delta_action:
+                if initial_state is not None:
+                    action_gt_sample = self.reconstruct_trajectory_from_delta(
+                        action_gt_sample, initial_state)
+                    action_pred_sample = self.reconstruct_trajectory_from_delta(
+                        action_pred_sample, initial_state)
+                    log_data["train_debug/delta_action_mode"] = True
+                else:
+                    # 如果没有提供初始状态，尝试从 batch 中获取
+                    if 'robot_eef_pose' in batch_raw.get('obs', {}):
+                        robot_state = batch_raw['obs']['robot_eef_pose']
+                        if isinstance(robot_state, torch.Tensor):
+                            robot_state = robot_state.cpu().numpy()
+                        # 取第一个样本的最后一个时间步作为初始状态
+                        initial_state = robot_state[sample_idx, -1]  # (Da,)
+                        action_gt_sample = self.reconstruct_trajectory_from_delta(
+                            action_gt_sample, initial_state)
+                        action_pred_sample = self.reconstruct_trajectory_from_delta(
+                            action_pred_sample, initial_state)
+                        log_data["train_debug/delta_action_mode"] = True
+                    else:
+                        print("⚠️ Delta action 模式但未提供 initial_state 且无法从 batch 获取 robot_eef_pose")
+                        log_data["train_debug/delta_action_mode"] = "missing_initial_state"
+
+            # 创建 3D 轨迹对比图（返回图像和诊断指标）
+            traj_img, diagnostic_metrics = self._create_3d_trajectory_comparison(
                 action_gt_sample,
-                f"Ground Truth (Epoch {epoch})"
+                action_pred_sample,
+                sample_idx=sample_idx,
+                epoch=epoch
             )
+            log_data["train_debug/trajectory_3d_comparison"] = traj_img
 
-        # Normalized action (from model)
-        action_norm_sample = None
-        if 'train_action_normalized' in captured_data:
-            action_norm = captured_data['train_action_normalized']
-            if isinstance(action_norm, torch.Tensor):
-                action_norm = action_norm.cpu().numpy()
+            # 记录诊断指标（数值范围和点距离）
+            for key, val in diagnostic_metrics.items():
+                log_data[f"train_debug/diagnostic_{key}"] = val
 
-            # 取第一个样本: (B, T, Da) -> (T, Da)
-            action_norm_sample = action_norm[sample_idx]
+            # 计算误差指标
+            metrics = self._compute_trajectory_metrics(action_gt_sample, action_pred_sample)
+            for key, val in metrics.items():
+                log_data[f"train_debug/{key}"] = val
 
-            log_data["train_actions/normalized"] = self._create_action_table(
-                action_norm_sample,
-                f"Normalized (Epoch {epoch})"
-            )
-
-        # ========== 2.1 动作轨迹 3D 可视化 ==========
-        # 对比 Ground Truth (原始batch) 和 Normalized (归一化后) 的轨迹
-        # 注意：训练时我们记录的都是归一化前后的 GT，因为训练时没有做完整推理
-
-        # Ground Truth 3D 轨迹（原始动作，未归一化）
-        if action_gt_sample is not None:
-            log_data["train_trajectory_3d/ground_truth_raw"] = self._create_3d_trajectory_plot(
-                action_gt_sample,
-                "Ground Truth (Raw)",
-                epoch,
-                is_normalized=False
-            )
-
-        # Normalized 3D 轨迹（归一化后的动作）
-        if action_norm_sample is not None:
-            log_data["train_trajectory_3d/ground_truth_normalized"] = self._create_3d_trajectory_plot(
-                action_norm_sample,
-                "Ground Truth (Normalized)",
-                epoch,
-                is_normalized=True
-            )
-
-        # ========== 3. Batch 元信息 ==========
+        # ========== 4. Batch 元信息 ==========
         batch_info = []
         if 'obs' in batch_raw:
             for key, value in batch_raw['obs'].items():
@@ -331,3 +371,261 @@ class TrainWandbDebugger:
             data.append(row)
 
         return wandb.Table(columns=columns, data=data)
+
+    def _create_3d_trajectory_comparison(self,
+                                        gt_trajectory: np.ndarray,
+                                        pred_trajectory: np.ndarray,
+                                        sample_idx: int,
+                                        epoch: int) -> tuple:
+        """
+        创建 GT vs Pred 的 3D 轨迹对比图
+
+        Args:
+            gt_trajectory: (T, action_dim) ground truth actions (denormalized)
+            pred_trajectory: (T, action_dim) predicted actions (denormalized)
+            sample_idx: 样本索引（用于标题）
+            epoch: 当前 epoch
+
+        Returns:
+            tuple: (wandb.Image, dict of diagnostic metrics)
+        """
+        # 提取 XYZ 坐标（前3维）
+        gt_xyz = gt_trajectory[:, :3]    # (T, 3)
+        pred_xyz = pred_trajectory[:, :3]
+
+        T = gt_xyz.shape[0]
+
+        # === 收集诊断指标（仅保留关键的mean值） ===
+        gt_dists = np.linalg.norm(np.diff(gt_xyz, axis=0), axis=1)
+        pred_dists = np.linalg.norm(np.diff(pred_xyz, axis=0), axis=1)
+
+        diagnostic_metrics = {
+            'gt_action_mean': float(gt_trajectory.mean()),
+            'pred_action_mean': float(pred_trajectory.mean()),
+            'gt_point_dist_mean': float(gt_dists.mean()),
+            'pred_point_dist_mean': float(pred_dists.mean()),
+            'point_dist_ratio': float(pred_dists.mean() / (gt_dists.mean() + 1e-10))
+        }
+
+        # 创建 3D 图
+        fig = plt.figure(figsize=(12, 10))
+        ax = fig.add_subplot(111, projection='3d')
+
+        # 坐标映射（与单帧GT轨迹可视化一致）
+        # 数据: [x_front_back, y_left_right, z_up_down]
+        # 绘图: x=left_right, y=front_back, z=up_down
+        gt_plot_x = gt_xyz[:, 1]  # left-right
+        gt_plot_y = gt_xyz[:, 0]  # front-back
+        gt_plot_z = gt_xyz[:, 2]  # up-down
+
+        pred_plot_x = pred_xyz[:, 1]
+        pred_plot_y = pred_xyz[:, 0]
+        pred_plot_z = pred_xyz[:, 2]
+
+        # === 绘制 GT 轨迹（蓝色实线） ===
+        ax.plot(gt_plot_x, gt_plot_y, gt_plot_z,
+                'b-', linewidth=2.5, label='Ground Truth', alpha=0.8)
+        ax.scatter(gt_plot_x, gt_plot_y, gt_plot_z,
+                   c='blue', s=50, marker='o', alpha=0.6, zorder=3)
+
+        # === 绘制 Pred 轨迹（红色虚线） ===
+        ax.plot(pred_plot_x, pred_plot_y, pred_plot_z,
+                'r--', linewidth=2.5, label='Prediction', alpha=0.8)
+        ax.scatter(pred_plot_x, pred_plot_y, pred_plot_z,
+                   c='red', s=50, marker='^', alpha=0.6, zorder=3)
+
+        # === 标记起点（绿色系） ===
+        ax.scatter(gt_plot_x[0], gt_plot_y[0], gt_plot_z[0],
+                   c='green', s=150, marker='o', label='Start (GT)',
+                   zorder=5, edgecolors='black', linewidth=1.5)
+        ax.scatter(pred_plot_x[0], pred_plot_y[0], pred_plot_z[0],
+                   c='lime', s=120, marker='^', label='Start (Pred)',
+                   zorder=5, edgecolors='black', linewidth=1.5)
+
+        # === 标记终点 ===
+        ax.scatter(gt_plot_x[-1], gt_plot_y[-1], gt_plot_z[-1],
+                   c='purple', s=150, marker='s', label='End (GT)',
+                   zorder=5, edgecolors='black', linewidth=1.5)
+        ax.scatter(pred_plot_x[-1], pred_plot_y[-1], pred_plot_z[-1],
+                   c='orange', s=150, marker='D', label='End (Pred)',
+                   zorder=5, edgecolors='black', linewidth=1.5)
+
+        # === 绘制误差向量（每隔几步绘制一次） ===
+        step_interval = max(1, T // 5)  # 显示约5条误差线
+        for t in range(0, T, step_interval):
+            ax.plot([gt_plot_x[t], pred_plot_x[t]],
+                    [gt_plot_y[t], pred_plot_y[t]],
+                    [gt_plot_z[t], pred_plot_z[t]],
+                    'gray', linestyle=':', linewidth=1, alpha=0.5, zorder=2)
+
+        # === 添加时间标签 ===
+        label_interval = max(1, T // 8)
+        for t in range(0, T, label_interval):
+            # 标记 GT 轨迹上的时间步
+            ax.text(gt_plot_x[t], gt_plot_y[t], gt_plot_z[t],
+                    f't={t}', fontsize=7, color='blue', alpha=0.7)
+
+        # === 计算误差统计（用于标题） ===
+        position_errors = np.linalg.norm(gt_xyz - pred_xyz, axis=1)
+        mean_error = np.mean(position_errors)
+        endpoint_error = position_errors[-1]
+        max_error = np.max(position_errors)
+
+        # === 设置标签和标题 ===
+        ax.set_xlabel('Left-Right (dim_1) →', fontsize=11, fontweight='bold')
+        ax.set_ylabel('Front-Back (dim_0) ⊙', fontsize=11, fontweight='bold')
+        ax.set_zlabel('Up-Down (dim_2) ↑', fontsize=11, fontweight='bold')
+
+        title = (f'3D Trajectory Comparison - Real World Coordinates\n'
+                f'Epoch {epoch} | Sample {sample_idx} | Horizon {T}\n'
+                f'Mean Error: {mean_error:.4f} | Endpoint Error: {endpoint_error:.4f} | Max Error: {max_error:.4f}')
+        ax.set_title(title, fontsize=12, fontweight='bold')
+
+        # === 图例和网格 ===
+        ax.legend(loc='upper right', fontsize=9, framealpha=0.9)
+        ax.grid(True, alpha=0.3)
+
+        # === 设置视角 ===
+        ax.view_init(elev=25, azim=-60)
+
+        # === 转换为图像 ===
+        plt.tight_layout()
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', dpi=120, bbox_inches='tight')
+        buf.seek(0)
+        img = Image.open(buf)
+        plt.close(fig)
+
+        img_array = np.array(img)
+        caption = f"Sample {sample_idx} | Epoch {epoch} | Mean Error: {mean_error:.4f}"
+
+        # 返回图像和诊断指标
+        return wandb.Image(img_array, caption=caption), diagnostic_metrics
+
+    def _compute_trajectory_metrics(self,
+                                   gt_trajectory: np.ndarray,
+                                   pred_trajectory: np.ndarray) -> Dict[str, float]:
+        """
+        计算轨迹误差指标
+
+        Args:
+            gt_trajectory: (T, action_dim) ground truth
+            pred_trajectory: (T, action_dim) prediction
+
+        Returns:
+            Dict 包含各种误差指标
+        """
+        # 提取 XYZ 坐标
+        gt_xyz = gt_trajectory[:, :3]
+        pred_xyz = pred_trajectory[:, :3]
+
+        # 位置误差（逐时间步的 L2 距离）
+        position_errors = np.linalg.norm(gt_xyz - pred_xyz, axis=1)  # (T,)
+
+        metrics = {
+            'mean_position_error': float(np.mean(position_errors)),
+            'endpoint_error': float(position_errors[-1]),
+            'startpoint_error': float(position_errors[0]),
+            'max_position_error': float(np.max(position_errors)),
+            'std_position_error': float(np.std(position_errors)),
+        }
+
+        # 旋转误差（如果有 dims 3:6）
+        if gt_trajectory.shape[1] >= 6:
+            gt_rot = gt_trajectory[:, 3:6]
+            pred_rot = pred_trajectory[:, 3:6]
+            orientation_errors = np.linalg.norm(gt_rot - pred_rot, axis=1)
+            metrics['mean_orientation_error'] = float(np.mean(orientation_errors))
+            metrics['endpoint_orientation_error'] = float(orientation_errors[-1])
+
+        # 夹爪误差（如果有 dim 6）
+        if gt_trajectory.shape[1] >= 7:
+            gripper_errors = np.abs(gt_trajectory[:, 6] - pred_trajectory[:, 6])
+            metrics['mean_gripper_error'] = float(np.mean(gripper_errors))
+            metrics['endpoint_gripper_error'] = float(gripper_errors[-1])
+
+        return metrics
+
+    def log_validation_trajectories(self,
+                                     val_samples: list,
+                                     epoch: int,
+                                     global_step: int):
+        """
+        记录验证集的3D轨迹对比（仅轨迹，不含图像）
+
+        Args:
+            val_samples: 验证样本列表，每个包含:
+                {
+                    'action_gt': (Ta, 7) ground truth - denormalized numpy,
+                    'action_pred': (Ta, 7) prediction - denormalized numpy,
+                    'loss': scalar,
+                    'initial_state': (7,) optional, delta action 模式下的初始状态
+                }
+            epoch: 当前epoch
+            global_step: 全局step
+        """
+        if not self.enabled:
+            return
+
+        log_data = {}
+        print(f"[TrainWandbDebugger] 记录{len(val_samples)}个验证样本的3D轨迹...")
+
+        all_metrics = []
+        all_diagnostics = []
+
+        for i, sample in enumerate(val_samples):
+            action_gt = sample['action_gt']  # (Ta, 7)
+            action_pred = sample['action_pred']  # (Ta, 7)
+
+            # === Delta Action 模式：从初始状态重建绝对轨迹 ===
+            if self.delta_action:
+                initial_state = sample.get('initial_state')
+                if initial_state is not None:
+                    action_gt = self.reconstruct_trajectory_from_delta(action_gt, initial_state)
+                    action_pred = self.reconstruct_trajectory_from_delta(action_pred, initial_state)
+                else:
+                    print(f"⚠️ 验证样本 {i} 缺少 initial_state，无法重建轨迹")
+
+            # 记录3D轨迹（返回图像和诊断指标）
+            traj_img, diagnostic_metrics = self._create_3d_trajectory_comparison(
+                action_gt, action_pred, sample_idx=i, epoch=epoch
+            )
+            log_data[f"val_debug/sample_{i}/trajectory_3d"] = traj_img
+
+            # 记录诊断指标
+            for key, val in diagnostic_metrics.items():
+                log_data[f"val_debug/sample_{i}/diagnostic_{key}"] = val
+            all_diagnostics.append(diagnostic_metrics)
+
+            # 计算误差指标
+            metrics = self._compute_trajectory_metrics(action_gt, action_pred)
+            all_metrics.append(metrics)
+
+            for key, val in metrics.items():
+                log_data[f"val_debug/sample_{i}/{key}"] = val
+
+        # 汇总误差指标
+        if all_metrics:
+            summary_metrics = {}
+            metric_keys = all_metrics[0].keys()
+            for key in metric_keys:
+                values = [m[key] for m in all_metrics]
+                summary_metrics[f"avg_{key}"] = float(np.mean(values))
+                summary_metrics[f"std_{key}"] = float(np.std(values))
+                if 'error' in key:  # 对误差指标计算最小/最大值
+                    summary_metrics[f"min_{key}"] = float(np.min(values))
+                    summary_metrics[f"max_{key}"] = float(np.max(values))
+
+            for key, val in summary_metrics.items():
+                log_data[f"val_debug_summary/{key}"] = val
+
+        # 汇总诊断指标（仅平均值）
+        if all_diagnostics:
+            diag_keys = all_diagnostics[0].keys()
+            for key in diag_keys:
+                values = [d[key] for d in all_diagnostics]
+                log_data[f"val_debug_summary/avg_diagnostic_{key}"] = float(np.mean(values))
+
+        # 记录到WandB
+        self.wandb_run.log(log_data, step=global_step)
+        print(f"✅ 验证轨迹已记录到WandB")

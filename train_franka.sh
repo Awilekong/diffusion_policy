@@ -12,7 +12,7 @@ cd /home/zpw/ws_zpw/megvii/IL/diffusion_policy
 # ===============================================
 nohup python train.py \
     --config-name=train_diffusion_unet_franka_image_workspace \
-    task.dataset_path=/mlp_vepfs/share/zpw/data/zarr_dataset/peg_in_hole_zarr \
+    task.dataset_path=/home/zpw/ws_zpw/zpw/data/zarr_dataset/peg_in_hole_zarr \
     exp_name="baseline_h16_obs1" \
     training.device="cuda:1" \
     > logs/train_baseline_h16_obs1.log 2>&1 &

@@ -3,9 +3,26 @@ import copy
 import torch
 import torch.nn as nn
 import torchvision
+import torchvision.transforms.functional as TF
 from diffusion_policy.model.vision.crop_randomizer import CropRandomizer
 from diffusion_policy.model.common.module_attr_mixin import ModuleAttrMixin
 from diffusion_policy.common.pytorch_util import dict_apply, replace_submodules
+
+
+class FixedCrop(nn.Module):
+    """固定位置的裁剪，用于自定义 crop 区域"""
+    def __init__(self, top: int, left: int, height: int, width: int):
+        super().__init__()
+        self.top = top
+        self.left = left
+        self.height = height
+        self.width = width
+
+    def forward(self, img):
+        return TF.crop(img, self.top, self.left, self.height, self.width)
+
+    def __repr__(self):
+        return f"FixedCrop(top={self.top}, left={self.left}, height={self.height}, width={self.width})"
 
 
 class MultiImageObsEncoder(ModuleAttrMixin):
@@ -14,6 +31,9 @@ class MultiImageObsEncoder(ModuleAttrMixin):
             rgb_model: Union[nn.Module, Dict[str,nn.Module]],
             resize_shape: Union[Tuple[int,int], Dict[str,tuple], None]=None,
             crop_shape: Union[Tuple[int,int], Dict[str,tuple], None]=None,
+            # crop_pos: [top, left] 指定裁剪起始位置，支持 tuple 或 dict 格式
+            # 如果为 None，则根据 random_crop 决定使用随机裁剪或中心裁剪
+            crop_pos: Union[Tuple[int,int], Dict[str,tuple], None]=None,
             random_crop: bool=True,
             # replace BatchNorm with GroupNorm
             use_group_norm: bool=False,
@@ -21,7 +41,9 @@ class MultiImageObsEncoder(ModuleAttrMixin):
             share_rgb_model: bool=False,
             # renormalize rgb input with imagenet normalization
             # assuming input in [0,1]
-            imagenet_norm: bool=False
+            imagenet_norm: bool=False,
+            # use state (low-dim) input along with image observations
+            use_state_input: bool=True
         ):
         """
         Assumes rgb input: B,C,H,W
@@ -85,24 +107,43 @@ class MultiImageObsEncoder(ModuleAttrMixin):
                     )
                     input_shape = (shape[0],h,w)
 
-                # configure randomizer
+                # configure cropper
                 this_randomizer = nn.Identity()
                 if crop_shape is not None:
+                    # 解析 crop_shape
                     if isinstance(crop_shape, dict):
-                        h, w = crop_shape[key]
+                        crop_h, crop_w = crop_shape[key]
                     else:
-                        h, w = crop_shape
-                    if random_crop:
+                        crop_h, crop_w = crop_shape
+
+                    # 解析 crop_pos
+                    this_crop_pos = None
+                    if crop_pos is not None:
+                        if isinstance(crop_pos, dict):
+                            this_crop_pos = crop_pos.get(key, None)
+                        else:
+                            this_crop_pos = crop_pos
+
+                    # 根据配置选择裁剪方式
+                    if this_crop_pos is not None:
+                        # 使用自定义位置的固定裁剪
+                        top, left = this_crop_pos
+                        this_randomizer = FixedCrop(
+                            top=top, left=left, height=crop_h, width=crop_w
+                        )
+                    elif random_crop:
+                        # 训练时随机裁剪，推理时中心裁剪
                         this_randomizer = CropRandomizer(
                             input_shape=input_shape,
-                            crop_height=h,
-                            crop_width=w,
+                            crop_height=crop_h,
+                            crop_width=crop_w,
                             num_crops=1,
                             pos_enc=False
                         )
                     else:
-                        this_normalizer = torchvision.transforms.CenterCrop(
-                            size=(h,w)
+                        # 中心裁剪
+                        this_randomizer = torchvision.transforms.CenterCrop(
+                            size=(crop_h, crop_w)
                         )
                 # configure normalizer
                 this_normalizer = nn.Identity()
@@ -126,6 +167,7 @@ class MultiImageObsEncoder(ModuleAttrMixin):
         self.rgb_keys = rgb_keys
         self.low_dim_keys = low_dim_keys
         self.key_shape_map = key_shape_map
+        self.use_state_input = use_state_input
 
     def forward(self, obs_dict):
         batch_size = None
@@ -175,17 +217,18 @@ class MultiImageObsEncoder(ModuleAttrMixin):
             # 调试回调：记录 transform 后送入 ResNet 的图像（Stage 4）
             if self.debug_callback is not None and len(transformed_imgs) > 0:
                 self.debug_callback('stage4_final_to_unet', transformed_imgs)
-        
-        # process lowdim input
-        for key in self.low_dim_keys:
-            data = obs_dict[key]
-            if batch_size is None:
-                batch_size = data.shape[0]
-            else:
-                assert batch_size == data.shape[0]
-            assert data.shape[1:] == self.key_shape_map[key]
-            features.append(data)
-        
+
+        # process lowdim input (conditionally based on use_state_input)
+        if self.use_state_input:
+            for key in self.low_dim_keys:
+                data = obs_dict[key]
+                if batch_size is None:
+                    batch_size = data.shape[0]
+                else:
+                    assert batch_size == data.shape[0]
+                assert data.shape[1:] == self.key_shape_map[key]
+                features.append(data)
+
         # concatenate all features
         result = torch.cat(features, dim=-1)
         return result

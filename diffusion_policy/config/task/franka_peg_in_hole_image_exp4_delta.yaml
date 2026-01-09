@@ -1,0 +1,49 @@
+name: franka_peg_in_hole_image_exp4_delta
+
+# 图像配置 - 对应你的 480x640 分辨率
+image_shape: [3, 480, 640]  # C, H, W
+
+# 数据集路径
+dataset_path: /home/zpw/ws_zpw/zpw/data/zarr_dataset/peg_in_hole_zarr
+
+shape_meta: &shape_meta
+  # acceptable types: rgb, low_dim
+  obs:
+    # 相机配置 - 根据需要选择使用哪些相机
+    camera_0:  # main_realsense
+      shape: ${task.image_shape}
+      type: rgb
+    camera_1:  # handeye_realsense
+      shape: ${task.image_shape}
+      type: rgb
+    camera_2:  # side_realsense
+      shape: ${task.image_shape}
+      type: rgb
+
+    # 末端位姿状态 (7维: xyz + rotation_vector + gripper)
+    robot_eef_pose:
+      shape: [7]
+      type: low_dim
+
+  # 动作空间 (7维: 6维末端位姿 + 1维夹爪)
+  action:
+    shape: [7]
+
+# 如果需要运行真机推理，配置 env_runner
+# env_runner:
+#   _target_: diffusion_policy.env_runner.franka_image_runner.FrankaImageRunner
+
+dataset:
+  _target_: diffusion_policy.dataset.real_pusht_image_dataset.RealPushTImageDataset
+  shape_meta: *shape_meta
+  dataset_path: ${task.dataset_path}
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1+${n_latency_steps}'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  n_obs_steps: ${dataset_obs_steps}
+  n_latency_steps: ${n_latency_steps}
+  use_cache: True
+  seed: 42
+  val_ratio: 0.02  # 2% 作为验证集
+  max_train_episodes: 50  # 实验4: 只使用50条数据
+  delta_action: True  # 实验4: 使用delta位姿

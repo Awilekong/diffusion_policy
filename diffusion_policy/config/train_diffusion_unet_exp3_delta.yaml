@@ -1,13 +1,18 @@
 defaults:
   - _self_
-  - task: franka_peg_in_hole_image
+  - task: franka_peg_in_hole_image_exp3_delta
 
-name: train_diffusion_unet_franka_image
+name: train_diffusion_unet_exp3_delta
 _target_: diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
 
 task_name: ${task.name}
 shape_meta: ${task.shape_meta}
-exp_name: "default"
+exp_name: "exp3_310episodes_frozen_encoder_delta"
+
+# ============================================
+# 实验3配置: 310条数据 + 冻结Encoder + Delta Action
+# 对应实验1，只改delta_action=True
+# ============================================
 
 horizon: 16
 n_obs_steps: 1
@@ -22,19 +27,17 @@ policy:
   _target_: diffusion_policy.policy.diffusion_unet_image_policy.DiffusionUnetImagePolicy
 
   shape_meta: ${shape_meta}
-  
+
   noise_scheduler:
     _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
     num_train_timesteps: 100
     beta_start: 0.0001
     beta_end: 0.02
-    # beta_schedule is important
-    # this is the best we found
     beta_schedule: squaredcos_cap_v2
     clip_sample: True
     set_alpha_to_one: True
     steps_offset: 0
-    prediction_type: epsilon # or sample
+    prediction_type: epsilon
 
   obs_encoder:
     _target_: diffusion_policy.model.vision.multi_image_obs_encoder.MultiImageObsEncoder
@@ -42,16 +45,14 @@ policy:
     rgb_model:
       _target_: diffusion_policy.model.vision.model_getter.get_resnet
       name: resnet18
-      weights: null  # 如果想用 ImageNet 预训练权重，改为 'IMAGENET1K_V1'
-    
-    # 图像预处理配置 - 保持官方推荐的分辨率
-    resize_shape: [240, 320]  # H, W - 官方标准分辨率
+      weights: null
+    resize_shape: [240, 320]
     crop_shape: [240, 320]
-    random_crop: False  # 实验组5: 关闭随机裁剪，使用中心裁剪
+    random_crop: False
     use_group_norm: True
-    share_rgb_model: False  # 不同相机使用不同的编码器
+    share_rgb_model: False
     imagenet_norm: True
-    use_state_input: True  # Set to False to use only image observations (no state)
+    use_state_input: True
 
   horizon: ${horizon}
   n_action_steps: ${eval:'${n_action_steps}+${n_latency_steps}'}
@@ -73,7 +74,7 @@ ema:
   max_value: 0.9999
 
 dataloader:
-  batch_size: 128  # 根据 GPU 内存调整
+  batch_size: 128
   num_workers: 8
   shuffle: False
   pin_memory: True
@@ -88,46 +89,37 @@ val_dataloader:
 
 optimizer:
   _target_: torch.optim.AdamW
-  lr: 5.0e-5  # 调整:batch_size 从 64->32,学习率也减半
+  lr: 5.0e-5
   betas: [0.95, 0.999]
   eps: 1.0e-8
   weight_decay: 1.0e-6
 
 training:
-  device: "cuda:0"
+  device: "cuda:3"
   seed: 42
   debug: False
   resume: True
-  # optimization
   lr_scheduler: cosine
-  lr_warmup_steps: 3000  # 调整:batch_size 减半,warmup steps 加倍以保持相同 warmup 时长
-  num_epochs: 150
+  lr_warmup_steps: 3000
+  num_epochs: 400  # 对应实验1
   gradient_accumulate_every: 1
-  # EMA destroys performance when used with BatchNorm
-  # replace BatchNorm with GroupNorm.
   use_ema: True
-  freeze_encoder: False
-  # training loop control
-  # in epochs
+  freeze_encoder: True  # 冻结encoder
   rollout_every: 50
   checkpoint_every: 50
   val_every: 5
   sample_every: 5
-  # steps per epoch
   max_train_steps: null
   max_val_steps: null
-  # misc
   tqdm_interval_sec: 1.0
 
-  # 训练数据调试（完整的4阶段数据流）
-  enable_data_debug: True           # 启用训练数据调试（会在第一个step自动记录）
-  debug_every: 10                   # 后续每 N 个 epoch 记录一次
+  enable_data_debug: True
+  debug_every: 10
 
-  # 验证数据调试（3D轨迹对比可视化）
-  enable_val_debug: True            # 启用验证数据调试
-  val_debug_every: 10                # 每5个epoch记录一次验证样本
-  val_debug_num_samples: 3          # 每次记录的样本数（建议5-10）
-  val_debug_full_first_time: True   # 保留（向后兼容）
+  enable_val_debug: True
+  val_debug_every: 10
+  val_debug_num_samples: 3
+  val_debug_full_first_time: True
 
 logging:
   project: diffusion_policy_franka
