@@ -21,13 +21,22 @@ shape_meta: &shape_meta
       type: rgb
 
     # 末端位姿状态 (7维: xyz + rotation_vector + gripper)
+    # 可选 dims 参数用于选择特定维度:
+    #   dims: "xyz"     → 只用位置 (3维)
+    #   dims: "xyzrpw"  → 位置+旋转 (6维)
+    #   dims: "xyzrpwg" → 完整 (7维)
+    #   dims: "xyzg"    → 位置+夹爪 (4维)
+    # 维度映射: x=0, y=1, z=2, r=3(roll), p=4(pitch), w=5(yaw), g=6(gripper)
     robot_eef_pose:
       shape: [7]
       type: low_dim
+      # dims: "xyz"  # 取消注释以只使用位置
 
   # 动作空间 (7维: 6维末端位姿 + 1维夹爪)
+  # 同样支持 dims 参数
   action:
     shape: [7]
+    # dims: "xyz"  # 取消注释以只输出位置动作
 
 # 如果需要运行真机推理，配置 env_runner
 # env_runner:

@@ -25,6 +25,32 @@ from diffusion_policy.common.normalize_util import (
     array_to_stats
 )
 
+# 维度映射表：语义化维度符号 -> 索引
+DIM_MAP = {
+    'x': 0,  # X 位置
+    'y': 1,  # Y 位置
+    'z': 2,  # Z 位置
+    'r': 3,  # Roll
+    'p': 4,  # Pitch
+    'w': 5,  # Yaw (用 w 避免与 y 冲突)
+    'g': 6,  # Gripper
+}
+
+def parse_dims(dims_str: str) -> list:
+    """
+    解析语义化的维度字符串为索引列表
+
+    示例:
+        "xyz"    → [0, 1, 2]
+        "xyzrpw" → [0, 1, 2, 3, 4, 5]
+        "xyzg"   → [0, 1, 2, 6]
+        "xyzrpwg" → [0, 1, 2, 3, 4, 5, 6]
+    """
+    if dims_str is None:
+        return None
+    return [DIM_MAP[c] for c in dims_str.lower()]
+
+
 class RealPushTImageDataset(BaseImageDataset):
     def __init__(self,
             shape_meta: dict,
@@ -232,7 +258,7 @@ def _get_replay_buffer(dataset_path, shape_meta, store):
     rgb_keys = list()
     lowdim_keys = list()
     out_resolutions = dict()
-    lowdim_shapes = dict()
+    lowdim_dim_indices = dict()  # 存储每个 lowdim key 的维度索引
     obs_shape_meta = shape_meta['obs']
     for key, attr in obs_shape_meta.items():
         type = attr.get('type', 'low_dim')
@@ -243,12 +269,14 @@ def _get_replay_buffer(dataset_path, shape_meta, store):
             out_resolutions[key] = (w,h)
         elif type == 'low_dim':
             lowdim_keys.append(key)
-            lowdim_shapes[key] = tuple(shape)
-            if 'pose' in key:
-                assert tuple(shape) in [(2,),(6,),(7,)]  # 支持 2D/6D/7D
-    
-    action_shape = tuple(shape_meta['action']['shape'])
-    assert action_shape in [(2,),(6,),(7,)]  # 支持 2D/6D/7D action
+            # 读取 dims 配置并解析为索引
+            dims = attr.get('dims', None)
+            if dims is not None:
+                lowdim_dim_indices[key] = parse_dims(dims)
+
+    # action 的维度索引
+    action_dims = shape_meta['action'].get('dims', None)
+    action_dim_indices = parse_dims(action_dims)
 
     # load data
     cv2.setNumThreads(1)
@@ -261,17 +289,16 @@ def _get_replay_buffer(dataset_path, shape_meta, store):
             image_keys=rgb_keys
         )
 
-    # transform lowdim dimensions
-    if action_shape == (2,):
-        # 2D action space, only controls X and Y
+    # 通用维度选择逻辑
+    # 处理 action
+    if action_dim_indices is not None:
         zarr_arr = replay_buffer['action']
-        zarr_resize_index_last_dim(zarr_arr, idxs=[0,1])
-    
-    for key, shape in lowdim_shapes.items():
-        if 'pose' in key and shape == (2,):
-            # only take X and Y
-            zarr_arr = replay_buffer[key]
-            zarr_resize_index_last_dim(zarr_arr, idxs=[0,1])
+        zarr_resize_index_last_dim(zarr_arr, idxs=action_dim_indices)
+
+    # 处理 lowdim obs
+    for key, dim_indices in lowdim_dim_indices.items():
+        zarr_arr = replay_buffer[key]
+        zarr_resize_index_last_dim(zarr_arr, idxs=dim_indices)
 
     return replay_buffer
 

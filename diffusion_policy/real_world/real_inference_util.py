@@ -1,6 +1,23 @@
-from typing import Dict, Callable, Tuple
+from typing import Dict, Callable, Tuple, List, Optional
 import numpy as np
 from diffusion_policy.common.cv2_util import get_image_transform
+
+# 维度映射表：语义化维度符号 -> 索引
+DIM_MAP = {
+    'x': 0,  # X 位置
+    'y': 1,  # Y 位置
+    'z': 2,  # Z 位置
+    'r': 3,  # Roll
+    'p': 4,  # Pitch
+    'w': 5,  # Yaw (用 w 避免与 y 冲突)
+    'g': 6,  # Gripper
+}
+
+def parse_dims(dims_str: Optional[str]) -> Optional[List[int]]:
+    """解析语义化的维度字符串为索引列表"""
+    if dims_str is None:
+        return None
+    return [DIM_MAP[c] for c in dims_str.lower()]
 
 def get_real_obs_dict(
         env_obs: Dict[str, np.ndarray], 
@@ -99,12 +116,13 @@ def get_real_obs_dict(
         elif type == 'low_dim':
             # ========== 低维数据处理 ==========
             this_data_in = env_obs[key]
-            
-            # 特殊处理：如果是 pose 且模型只需要 2D（XY坐标）
-            if 'pose' in key and shape == (2,):
-                # 从完整 pose (x,y,z,rx,ry,rz) 提取前两维 (x,y)
-                this_data_in = this_data_in[...,[0,1]]
-            
+
+            # 通过 dims 参数选择特定维度
+            dims = attr.get('dims', None)
+            if dims is not None:
+                dim_indices = parse_dims(dims)
+                this_data_in = this_data_in[..., dim_indices]
+
             # 直接传递（保持原始 shape 和 dtype）
             obs_dict_np[key] = this_data_in
     return obs_dict_np

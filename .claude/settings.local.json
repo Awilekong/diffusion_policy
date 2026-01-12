@@ -15,7 +15,29 @@
       "Bash(chmod:*)",
       "Bash(python train.py:*)",
       "Bash(bash -c \"source ~/.bashrc && conda activate robodiff && which python\")",
-      "Bash(bash:*)"
+      "Bash(bash:*)",
+      "Bash(tree:*)",
+      "Bash(tmux ls:*)",
+      "Bash(tmux capture-pane:*)",
+      "Bash(nvidia-smi:*)",
+      "Bash(python:*)",
+      "Bash(/home/zpw/ws_zpw/miniconda3/envs/robodiff/bin/python:*)",
+      "Bash(git stash:*)",
+      "Bash(tmux has-session:*)",
+      "Bash(tmux kill-session:*)",
+      "Bash(git checkout:*)",
+      "Bash(/root/mambaforge/envs/robodiff/bin/python:*)",
+      "Bash(git rm:*)",
+      "Bash(python3:*)",
+      "Bash(tmux send-keys:*)",
+      "Bash(tmux new-session:*)",
+      "Bash(pip uninstall:*)",
+      "Bash(git add:*)",
+      "Bash(git reset:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git fetch:*)",
+      "Bash(git pull:*)"
     ]
   }
 }
